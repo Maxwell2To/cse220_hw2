@@ -15,12 +15,12 @@
 #define LAST_BE_BIT_MASK  0x00F0
 #define FIRST_BE_BIT_MASK 0x000F
 
-uint32_t getPacketType(unsigned int pack) {return pack & PACKET_TYPE_BIT_MASK;}
-uint32_t getAddress(unsigned int pack) {return pack & ADDRESS_BIT_MASK;}
+uint32_t getPacketType(unsigned int pack) {return (pack & PACKET_TYPE_BIT_MASK) >> 10;}
+uint32_t getAddress(unsigned int pack) {return (pack & ADDRESS_BIT_MASK) >> 2;}
 uint32_t getLength(unsigned int pack) {return pack & LENGTH_BIT_MASK;}
-uint32_t getRequesterID(unsigned int pack) {return pack & REQUESTER_ID_BIT_MASK;}
-uint32_t getTag(unsigned int pack) {return pack & TAG_BIT_MASK;}
-uint32_t getLastBE(unsigned int pack) {return pack & LAST_BE_BIT_MASK;}
+uint32_t getRequesterID(unsigned int pack) {return (pack & REQUESTER_ID_BIT_MASK) >> 16;}
+uint32_t getTag(unsigned int pack) {return (pack & TAG_BIT_MASK) >> 8;}
+uint32_t getLastBE(unsigned int pack) {return (pack & LAST_BE_BIT_MASK) >> 4;}
 uint32_t getFirstBE(unsigned int pack) {return pack & FIRST_BE_BIT_MASK;}
 
 
@@ -59,6 +59,7 @@ void print_packet(unsigned int packet[])
       for (uint32_t i = 0; i < length; i++)
         printf("%d ", packet[3+i]);
     }
+    printf("\n");
 }
 
 
