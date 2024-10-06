@@ -11,6 +11,4 @@ void store_values(unsigned int packets[], char *memory);
 
 unsigned int* create_completion(unsigned int packets[], const char *memory);
 
-int handle1Packet(unsigned int packets[], char *memory, int offset);
-
 #endif // HW2_H

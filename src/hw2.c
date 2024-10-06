@@ -31,6 +31,8 @@ uint32_t getTag(unsigned int pack) {return (pack & TAG_BIT_MASK) >> 8;}
 uint32_t getLastBE(unsigned int pack) {return (pack & LAST_BE_BIT_MASK) >> 4;}
 uint32_t getFirstBE(unsigned int pack) {return pack & FIRST_BE_BIT_MASK;}
 
+int handle1Packet(unsigned int packets[], char *memory, int offset);
+
 
 #define BUF_SIZE 33
 char *int2bin(int a, char *buffer, int buf_size) {
@@ -59,7 +61,7 @@ void print_packet(unsigned int packet[]) {
   }
 
     uint32_t packetType = getPacketType(packet[0]);
-    uint32_t address = getAddress(packet[2]);;
+    uint32_t address = getAddress(packet[2]);
     uint32_t length = getLength(packet[0]);
     uint32_t requesterID = getRequesterID(packet[1]); 
     uint32_t tag = getTag(packet[1]); 
@@ -214,8 +216,220 @@ int handle1Packet(unsigned int packets[], char *memory, int offset) {
 }
 
 
-unsigned int* create_completion(unsigned int packets[], const char *memory) {
-    (void)packets;
-    (void)memory;
-	return NULL;
+int readTlpRequest(unsigned int packets[], int offset, 
+uint32_t *packetType, uint32_t *address, uint32_t *length, uint32_t *requesterID, uint32_t *tag, uint32_t *firstBE, uint32_t *lastBE) {
+
+  *packetType = getPacketType(packets[offset + 0]);
+  if (*packetType != 0) { // you know it's a read packet or not
+    printf("No Output (invalid packet)\n");
+    return -1;
+  }
+
+  //print_packet(packets);
+
+  *address = getAddress(packets[offset + 2]);
+  *length = getLength(packets[offset + 0]);
+  *requesterID = getRequesterID(packets[offset + 1]); 
+  *tag = getTag(packets[offset + 1]); 
+  *firstBE = getFirstBE(packets[offset + 1]);
+  *lastBE = getLastBE(packets[offset + 1]);
+  return offset + 3;
 }
+
+///////////////////////////////////separte function to calculate byteCount and one to calulate lowerAddress
+/////////////////////// call these functions in responseFiller
+
+uint32_t findlowerAddress(uint32_t address){
+  return (address & 0x7F);  ///////// 7F translates to last 7 bits
+}
+
+////////////////////////////////////// bytecount is (length * 4) + (remaining length * 4)  
+//////////////////////////// address will need to be calculated
+//////////////////////////// length needs to split if byteCount exceeds a limit
+
+
+void responseFiller (
+  uint32_t* completionResponse, int completionOffset, const char *memory, uint32_t address, uint32_t length, uint32_t requesterID, uint32_t tag, 
+  uint32_t firstBE, uint32_t lastBE, uint32_t byteCount) {
+
+  //printf("INSIDE RESPONSE FILLER: address is %d \n", address);
+
+  uint32_t completerID = 0x00DC;
+  uint32_t packetType = 0x4A000000;
+
+  completionResponse[completionOffset + 0] |= packetType;
+  completionResponse[completionOffset + 0] |= length;
+
+  completionResponse[completionOffset + 1] |= (completerID << 16);
+  completionResponse[completionOffset + 1] |= byteCount; /// will be calculated outside of this function
+
+  completionResponse[completionOffset + 2] |= (requesterID << 16);
+  completionResponse[completionOffset + 2] |= (tag << 8);
+  completionResponse[completionOffset + 2] |= (findlowerAddress(address));
+
+  int addressCount = address;   /////////////////// intialize to address which keeps going up
+
+  for (uint32_t i = 0; i < length; i++) {
+    int dataRowOffset = completionOffset + 3 + i;
+    //printf("data row i is %d \n", i);
+
+    if (i==0) {  /////////////////// if  you are one first 
+      
+      if (isBit0SetInBE(firstBE)) {      
+        //printf("addressCount is %d and memory[addressCount] is %02X \n", addressCount, memory[addressCount]);
+        completionResponse[dataRowOffset] |= (memory[addressCount] & 0x000000FF);
+      }
+      addressCount++;
+      if (isBit1SetInBE(firstBE)) { //printf("addressCount is %d and memory[addressCount] is %02X \n", addressCount, memory[addressCount]);
+        completionResponse[dataRowOffset] |= ((memory[addressCount] << 8) & 0x0000FF00);
+        }
+      addressCount++;
+      if (isBit2SetInBE(firstBE)) { //printf("addressCount is %d and memory[addressCount] is %02X \n", addressCount, memory[addressCount]);
+        completionResponse[dataRowOffset] |= ((memory[addressCount] << 16) & 0x00FF0000);
+        }
+      addressCount++;     
+      if (isBit3SetInBE(firstBE)) { //printf("addressCount is %d and memory[addressCount] is %02X \n", addressCount, memory[addressCount]);
+        completionResponse[dataRowOffset] |= ((memory[addressCount] << 24) & 0xFF000000);
+        }
+      addressCount++;
+      if (length==1) { break; } 
+    }
+
+    else if (i == length-1) {
+      if (isBit0SetInBE(lastBE)) {completionResponse[dataRowOffset] |= (memory[addressCount] & 0x000000FF);}
+      addressCount++;
+      if (isBit1SetInBE(lastBE)) {completionResponse[dataRowOffset] |= ((memory[addressCount] << 8) & 0x0000FF00);}
+      addressCount++;
+      if (isBit2SetInBE(lastBE)) {completionResponse[dataRowOffset] |= ((memory[addressCount] << 16) & 0x00FF0000);}
+      addressCount++;     
+      if (isBit3SetInBE(lastBE)) {completionResponse[dataRowOffset] |= ((memory[addressCount] << 24) & 0xFF000000);}
+      addressCount++;
+    }
+
+    else {
+      completionResponse[dataRowOffset] |= (memory[addressCount] & 0x000000FF);
+      addressCount++;
+      completionResponse[dataRowOffset] |= ((memory[addressCount] << 8) & 0x0000FF00);
+      addressCount++;
+      completionResponse[dataRowOffset] |= ((memory[addressCount] << 16) & 0x00FF0000);
+      addressCount++;     
+      completionResponse[dataRowOffset] |= ((memory[addressCount] << 24) & 0xFF000000);
+      addressCount++;
+    }
+  }
+} 
+
+////////// if current address aka starting address + remaining length crosses over next 4k boundary then split
+/////////// otherwise whatever is remaining length should fit within next 4k boundary
+//////////// then just return rest of remaining length
+
+uint32_t splitLength(uint32_t remainingLength, uint32_t currentAddress) {
+    uint32_t startAddressBit14 = (currentAddress & 0x4000);
+    uint32_t endingAddress = currentAddress + remainingLength * 4;
+    uint32_t endingAddressBit14 = (endingAddress & 0x4000);
+
+    uint32_t firstHalfSplit = (currentAddress % 0x4000);
+
+    if (startAddressBit14 == endingAddressBit14){
+        return remainingLength;
+    }
+    return (0x4000 - firstHalfSplit) / 4;
+}
+
+uint32_t calculateMemorySize(unsigned int packets[]) {
+  int offset = 0;                
+  int headerCount = 0;
+  int lengthCount = 0;
+  int splitCount = 0;
+
+  while (offset != -1) {
+    uint32_t packetType = 0;
+    uint32_t address = 0;
+    uint32_t length = 0;
+    uint32_t requesterID = 0; 
+    uint32_t tag = 0; 
+    uint32_t firstBE = 0; 
+    uint32_t lastBE = 0; 
+    
+    //printf("##############offset before is %d\n", offset);
+    offset = readTlpRequest(packets, offset, &packetType, &address, &length, &requesterID, &tag, &firstBE, &lastBE);
+    //printf("offset after is %d\n", offset);
+
+    if (offset == -1)
+      break;
+    headerCount++;
+    lengthCount += length;
+
+    uint32_t remainingLength = length;
+    uint32_t startingAddress = address;
+
+    while (remainingLength > 0) {
+      uint32_t responseDataLength = splitLength(remainingLength, startingAddress);
+      remainingLength -= responseDataLength;
+      
+      if (0 != remainingLength)
+        splitCount++;
+
+      //printf("responseDataLength is %d and remaining length is %d \n", responseDataLength, remainingLength);
+      //printf("startingAddress is 0X%x\n", startingAddress);
+
+      startingAddress += responseDataLength * 4;
+    } 
+  }
+  return ((headerCount * 3) + (splitCount * 3) + lengthCount) * sizeof(uint32_t);
+}
+
+unsigned int* create_completion(unsigned int packets[], const char *memory) {
+  (void)memory;
+  uint32_t* completionResponse = NULL;
+  int offset = 0;
+    
+  int totalSize = calculateMemorySize(packets);  ///////////////////// allocate just enough memory here
+  completionResponse = malloc(totalSize);  
+  memset(completionResponse, 0, totalSize);
+  //printf("totalSize of allocated memory is %d \n", totalSize);
+  
+  uint32_t completionOffset = 0;                  
+  while (offset != -1) {
+    uint32_t packetType = 0;
+    uint32_t address = 0;
+    uint32_t length = 0;
+    uint32_t requesterID = 0; 
+    uint32_t tag = 0; 
+    uint32_t firstBE = 0; 
+    uint32_t lastBE = 0; 
+    //printf("##############offset before is %d\n", offset);
+    offset = readTlpRequest(packets, offset, &packetType, &address, &length, &requesterID, &tag, &firstBE, &lastBE);
+    //printf("offset after is %d\n", offset);
+    if (offset == -1)
+      break;
+    //printf("address: %d  length: %d   requesterID: %d   tag: %d   firstBE: %d  lastBE: %d \n",
+      //address, length, requesterID, tag, firstBE, lastBE);
+
+    uint32_t remainingLength = length;
+    uint32_t startingAddress = address;
+    
+
+//////////////////////////// address will need to be calculated
+//////////////////////////// length needs to split if byteCount exceeds a limit
+    while (remainingLength > 0) {
+      uint32_t responseDataLength = splitLength(remainingLength, startingAddress);
+      remainingLength -= responseDataLength;
+      uint32_t byteCount = (responseDataLength * 4) + (remainingLength * 4);
+      
+      //printf("responseDataLength is %d and remaining length is %d \n", responseDataLength, remainingLength);
+      //printf("bytecount is %d \n", byteCount);
+      //printf("startingAddress is 0X%x\n", startingAddress);
+
+      responseFiller (
+        completionResponse, completionOffset, memory, startingAddress, responseDataLength, requesterID, tag, 
+        firstBE, lastBE, byteCount);
+      completionOffset += 3 + responseDataLength;
+      startingAddress += responseDataLength * 4;
+    } 
+  }
+	return completionResponse;
+}
+
+
+
